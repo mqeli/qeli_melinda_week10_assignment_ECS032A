@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 import requests
 import streamlit as st
 
@@ -31,7 +32,7 @@ def create_chat() -> int:
     return chat_id
 
 
-def get_active_chat() -> dict | None:
+def get_active_chat() -> Optional[dict]:
     for chat in st.session_state.chats:
         if chat["id"] == st.session_state.active_chat_id:
             return chat
