@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import json
+import time
 import requests
 import streamlit as st
 
@@ -154,6 +155,7 @@ else:
                 "model": "meta-llama/Llama-3.2-1B-Instruct",
                 "messages": active_chat["messages"],
                 "max_tokens": 200,
+                "stream": True,
             }
 
             try:
@@ -162,16 +164,38 @@ else:
                     headers={"Authorization": f"Bearer {token}"},
                     json=payload,
                     timeout=60,
+                    stream=True,
                 )
                 if response.status_code == 200:
-                    data = response.json()
-                    assistant_reply = data["choices"][0]["message"]["content"].strip()
-                    active_chat["messages"].append(
-                        {"role": "assistant", "content": assistant_reply}
-                    )
-                    save_chat(active_chat)
                     with st.chat_message("assistant"):
-                        st.write(assistant_reply)
+                        placeholder = st.empty()
+                        assembled = ""
+                        for line in response.iter_lines(decode_unicode=True):
+                            if not line:
+                                continue
+                            if line.startswith("data: "):
+                                chunk = line.replace("data: ", "", 1).strip()
+                                if chunk == "[DONE]":
+                                    break
+                                try:
+                                    data = json.loads(chunk)
+                                except json.JSONDecodeError:
+                                    continue
+                                delta = (
+                                    data.get("choices", [{}])[0]
+                                    .get("delta", {})
+                                    .get("content", "")
+                                )
+                                if delta:
+                                    assembled += delta
+                                    placeholder.write(assembled)
+                                    time.sleep(0.02)
+
+                        if assembled.strip():
+                            active_chat["messages"].append(
+                                {"role": "assistant", "content": assembled.strip()}
+                            )
+                            save_chat(active_chat)
                 else:
                     st.error(f"API error {response.status_code}: {response.text}")
             except requests.RequestException as exc:
