@@ -181,11 +181,10 @@ else:
                                     data = json.loads(chunk)
                                 except json.JSONDecodeError:
                                     continue
-                                delta = (
-                                    data.get("choices", [{}])[0]
-                                    .get("delta", {})
-                                    .get("content", "")
-                                )
+                                choices = data.get("choices", [])
+                                if not choices:
+                                    continue
+                                delta = choices[0].get("delta", {}).get("content", "")
                                 if delta:
                                     assembled += delta
                                     placeholder.write(assembled)
