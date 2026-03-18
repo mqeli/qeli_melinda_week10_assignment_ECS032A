@@ -16,6 +16,7 @@ api_url = "https://router.huggingface.co/v1/chat/completions"
 base_dir = Path(__file__).resolve().parent
 chats_dir = base_dir / "chats"
 chats_dir.mkdir(parents=True, exist_ok=True)
+memory_path = base_dir / "memory.json"
 
 if "chats" not in st.session_state:
     st.session_state.chats = []
@@ -25,6 +26,8 @@ if "next_chat_id" not in st.session_state:
     st.session_state.next_chat_id = 1
 if "chats_loaded" not in st.session_state:
     st.session_state.chats_loaded = False
+if "memory" not in st.session_state:
+    st.session_state.memory = {}
 
 
 def chat_file_path(chat_id: int) -> Path:
@@ -87,6 +90,31 @@ def get_active_chat() -> Optional[dict]:
     return None
 
 
+def load_memory(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_memory(path: Path, memory: dict) -> None:
+    path.write_text(json.dumps(memory, indent=2), encoding="utf-8")
+
+
+def merge_memory(existing: dict, updates: dict) -> dict:
+    merged = dict(existing)
+    for key, value in updates.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        merged[key] = value
+    return merged
+
+
 if not st.session_state.chats_loaded:
     st.session_state.chats = load_chats_from_disk()
     max_id = max((chat["id"] for chat in st.session_state.chats), default=0)
@@ -94,6 +122,9 @@ if not st.session_state.chats_loaded:
     if st.session_state.active_chat_id is None and st.session_state.chats:
         st.session_state.active_chat_id = st.session_state.chats[0]["id"]
     st.session_state.chats_loaded = True
+
+if not st.session_state.memory:
+    st.session_state.memory = load_memory(memory_path)
 
 with st.sidebar:
     st.subheader("Chats")
@@ -130,6 +161,16 @@ with st.sidebar:
                         )
                     st.rerun()
 
+    with st.expander("User Memory", expanded=False):
+        if st.session_state.memory:
+            st.json(st.session_state.memory)
+        else:
+            st.write("No memory stored yet.")
+        if st.button("Clear Memory"):
+            st.session_state.memory = {}
+            save_memory(memory_path, st.session_state.memory)
+            st.rerun()
+
 if not token:
     st.error("Missing Hugging Face token. Please set HF_TOKEN in .streamlit/secrets.toml.")
 else:
@@ -153,7 +194,20 @@ else:
 
             payload = {
                 "model": "meta-llama/Llama-3.2-1B-Instruct",
-                "messages": active_chat["messages"],
+                "messages": (
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Use the following user memory to personalize responses: "
+                                f"{json.dumps(st.session_state.memory)}"
+                            ),
+                        }
+                    ]
+                    if st.session_state.memory
+                    else []
+                )
+                + active_chat["messages"],
                 "max_tokens": 200,
                 "stream": True,
             }
@@ -195,6 +249,45 @@ else:
                                 {"role": "assistant", "content": assembled.strip()}
                             )
                             save_chat(active_chat)
+
+                            # Extract user traits/preferences from the latest user message.
+                            extract_prompt = (
+                                "Given this user message, extract any personal facts or "
+                                "preferences as a JSON object. If none, return {}.\n\n"
+                                f"User message: {user_input}"
+                            )
+                            extract_payload = {
+                                "model": "meta-llama/Llama-3.2-1B-Instruct",
+                                "messages": [{"role": "user", "content": extract_prompt}],
+                                "max_tokens": 120,
+                            }
+                            try:
+                                extract_response = requests.post(
+                                    api_url,
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    json=extract_payload,
+                                    timeout=60,
+                                )
+                                if extract_response.status_code == 200:
+                                    extract_data = extract_response.json()
+                                    extract_text = (
+                                        extract_data["choices"][0]["message"]["content"].strip()
+                                    )
+                                    try:
+                                        extracted = json.loads(extract_text)
+                                    except json.JSONDecodeError:
+                                        extracted = {}
+                                    if isinstance(extracted, dict) and extracted:
+                                        st.session_state.memory = merge_memory(
+                                            st.session_state.memory, extracted
+                                        )
+                                        save_memory(memory_path, st.session_state.memory)
+                                else:
+                                    st.warning(
+                                        f"Memory extraction error {extract_response.status_code}"
+                                    )
+                            except requests.RequestException:
+                                st.warning("Memory extraction request failed.")
                 else:
                     st.error(f"API error {response.status_code}: {response.text}")
             except requests.RequestException as exc:
