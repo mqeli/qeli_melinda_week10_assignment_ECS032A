@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import json
+import re
 import time
 import requests
 import streamlit as st
@@ -114,6 +115,19 @@ def merge_memory(existing: dict, updates: dict) -> dict:
         merged[key] = value
     return merged
 
+
+def extract_json_object(text: str) -> dict:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {}
 
 if not st.session_state.chats_loaded:
     st.session_state.chats = load_chats_from_disk()
@@ -253,7 +267,8 @@ else:
                             # Extract user traits/preferences from the latest user message.
                             extract_prompt = (
                                 "Given this user message, extract any personal facts or "
-                                "preferences as a JSON object. If none, return {}.\n\n"
+                                "preferences as a JSON object. If none, return {}. "
+                                "Respond with JSON only (no extra text).\n\n"
                                 f"User message: {user_input}"
                             )
                             extract_payload = {
@@ -273,10 +288,7 @@ else:
                                     extract_text = (
                                         extract_data["choices"][0]["message"]["content"].strip()
                                     )
-                                    try:
-                                        extracted = json.loads(extract_text)
-                                    except json.JSONDecodeError:
-                                        extracted = {}
+                                    extracted = extract_json_object(extract_text)
                                     if isinstance(extracted, dict) and extracted:
                                         st.session_state.memory = merge_memory(
                                             st.session_state.memory, extracted
