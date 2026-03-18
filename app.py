@@ -1,5 +1,7 @@
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+import json
 import requests
 import streamlit as st
 
@@ -10,25 +12,70 @@ st.title("My AI Chat")
 token = st.secrets.get("HF_TOKEN", "").strip()
 api_url = "https://router.huggingface.co/v1/chat/completions"
 
+base_dir = Path(__file__).resolve().parent
+chats_dir = base_dir / "chats"
+chats_dir.mkdir(parents=True, exist_ok=True)
+
 if "chats" not in st.session_state:
     st.session_state.chats = []
 if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = None
 if "next_chat_id" not in st.session_state:
     st.session_state.next_chat_id = 1
+if "chats_loaded" not in st.session_state:
+    st.session_state.chats_loaded = False
+
+
+def chat_file_path(chat_id: int) -> Path:
+    return chats_dir / f"chat_{chat_id}.json"
+
+
+def load_chats_from_disk() -> list[dict]:
+    chats: list[dict] = []
+    for path in sorted(chats_dir.glob("chat_*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        chat_id = data.get("id")
+        if not isinstance(chat_id, int):
+            continue
+        chats.append(
+            {
+                "id": chat_id,
+                "title": data.get("title", "New Chat"),
+                "created_at": data.get("created_at", ""),
+                "messages": data.get("messages", []),
+            }
+        )
+    return chats
+
+
+def save_chat(chat: dict) -> None:
+    payload = {
+        "id": chat["id"],
+        "title": chat.get("title", "New Chat"),
+        "created_at": chat.get("created_at", ""),
+        "messages": chat.get("messages", []),
+    }
+    chat_file_path(chat["id"]).write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
 
 
 def create_chat() -> int:
     chat_id = st.session_state.next_chat_id
     st.session_state.next_chat_id += 1
-    st.session_state.chats.append(
-        {
-            "id": chat_id,
-            "title": "New Chat",
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "messages": [],
-        }
-    )
+    chat = {
+        "id": chat_id,
+        "title": "New Chat",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "messages": [],
+    }
+    st.session_state.chats.append(chat)
+    save_chat(chat)
     return chat_id
 
 
@@ -37,6 +84,15 @@ def get_active_chat() -> Optional[dict]:
         if chat["id"] == st.session_state.active_chat_id:
             return chat
     return None
+
+
+if not st.session_state.chats_loaded:
+    st.session_state.chats = load_chats_from_disk()
+    max_id = max((chat["id"] for chat in st.session_state.chats), default=0)
+    st.session_state.next_chat_id = max_id + 1
+    if st.session_state.active_chat_id is None and st.session_state.chats:
+        st.session_state.active_chat_id = st.session_state.chats[0]["id"]
+    st.session_state.chats_loaded = True
 
 with st.sidebar:
     st.subheader("Chats")
@@ -61,6 +117,10 @@ with st.sidebar:
                     st.session_state.chats = [
                         c for c in st.session_state.chats if c["id"] != chat["id"]
                     ]
+                    try:
+                        chat_file_path(chat["id"]).unlink(missing_ok=True)
+                    except OSError:
+                        pass
                     if st.session_state.active_chat_id == chat["id"]:
                         st.session_state.active_chat_id = (
                             st.session_state.chats[0]["id"]
@@ -85,6 +145,7 @@ else:
             active_chat["messages"].append({"role": "user", "content": user_input})
             if active_chat["title"] == "New Chat":
                 active_chat["title"] = user_input[:40]
+            save_chat(active_chat)
 
             with st.chat_message("user"):
                 st.write(user_input)
@@ -108,6 +169,7 @@ else:
                     active_chat["messages"].append(
                         {"role": "assistant", "content": assistant_reply}
                     )
+                    save_chat(active_chat)
                     with st.chat_message("assistant"):
                         st.write(assistant_reply)
                 else:
